@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as Comlink from 'comlink';
 import type { WorkerAPI } from './worker';
-import { Prover } from 'tlsn-js';
+import { Prover, mapStringToRange, subtractRanges } from 'tlsn-js';
 import { HTTPParser } from 'http-parser-js';
 
 // Initialize worker
@@ -104,14 +104,13 @@ function App() {
       // Step 6: Get transcript
       const transcript = await prover.transcript();
 
-      // DEBUG: Log the actual HTTP request that was sent
+      // Convert to strings for selective disclosure
       const sentStr = Buffer.from(transcript.sent).toString('utf-8');
+      const recvStr = Buffer.from(transcript.recv).toString('utf-8');
+
       console.log('🔍 DEBUG: Raw HTTP request sent:');
       console.log(sentStr);
       console.log('🔍 DEBUG: Request length:', transcript.sent.length);
-
-      // DEBUG: Log the HTTP response received
-      const recvStr = Buffer.from(transcript.recv).toString('utf-8');
       console.log('🔍 DEBUG: Raw HTTP response received:');
       console.log(recvStr);
       console.log('🔍 DEBUG: Response length:', transcript.recv.length);
@@ -125,20 +124,80 @@ function App() {
         `✅ Balance parsed: $${balance.toFixed(2)}\n` +
         `🎯 Threshold: $${config.threshold.toFixed(2)}\n` +
         `${balance > config.threshold ? '✅ QUALIFIES' : '❌ BELOW THRESHOLD'}\n` +
-        `🔒 Revealing data to verifier...`
+        `🔒 Preparing selective disclosure...`
       );
 
-      // Step 8: Reveal data (commit to balance)
+      // Step 8: SELECTIVE DISCLOSURE MODE
+      // Strategy: Reveal everything EXCEPT sensitive data, commit to sensitive data with SHA256
+      // - Reveal: HTTP headers, JSON structure, account names
+      // - Hide + Commit: Auth tokens, actual balance amounts
+
+      // Extract balance strings to hide (these are the sensitive parts)
+      const balanceStrings = accounts.map((acc: any) =>
+        `"current": ${acc.balance}`
+      );
+
+      console.log('🔒 Hiding balance values:', balanceStrings);
+
+      // Hide auth tokens in request
+      const secretPatterns = [
+        `"client_id": "${process.env.REACT_APP_PLAID_CLIENT_ID}"`,
+        `"secret": "${process.env.REACT_APP_PLAID_SECRET}"`,
+        `"access_token": "${process.env.REACT_APP_PLAID_ACCESS_TOKEN}"`,
+      ];
+
+      // Reveal request EXCEPT auth tokens
+      const sentRanges = subtractRanges(
+        { start: 0, end: transcript.sent.length },
+        mapStringToRange(secretPatterns, sentStr)
+      );
+
+      // Reveal response EXCEPT balance amounts
+      const recvRanges = subtractRanges(
+        { start: 0, end: transcript.recv.length },
+        mapStringToRange(balanceStrings, recvStr)
+      );
+
+      // Hash commitment ONLY to the balance amounts (efficient on-chain)
+      const balanceHashRanges = mapStringToRange(balanceStrings, recvStr);
+
+      console.log('✅ Revealing request ranges:', sentRanges);
+      console.log('✅ Revealing response ranges:', recvRanges);
+      console.log('🔐 Hash committing to balance ranges:', balanceHashRanges);
+
+      // NOTE: tlsn-js v0.1.0-alpha.12 doesn't support hash commitments in reveal() yet
+      // We need to use notarize() flow instead, which creates commitments
+      // For now, we'll use reveal() with partial disclosure as a workaround
+      setMessage(
+        `⚠️  NOTE: tlsn-js doesn't support hash commitments yet\n` +
+        `Using partial disclosure as workaround...\n` +
+        `(Full hash commitment support requires notarize() flow)`
+      );
+
       await prover.reveal({
-        sent: [{ start: 0, end: transcript.sent.length }],
-        recv: [{ start: 0, end: transcript.recv.length }],
+        // Reveal request without auth tokens
+        sent: sentRanges,
+
+        // Reveal response without balance amounts
+        recv: recvRanges,
+
+        // Reveal server identity
         server_identity: true,
       });
 
       setMessage(
-        `✅ Data revealed to verifier\n` +
-        `✅ Attestation created\n\n` +
-        `🎉 Proof of Reserves Complete!`
+        `✅ Selective disclosure complete!\n\n` +
+        `🔓 REVEALED to verifier:\n` +
+        `  ✓ Server identity (sandbox.plaid.com)\n` +
+        `  ✓ Request structure (auth tokens HIDDEN)\n` +
+        `  ✓ Response structure (balance amounts HIDDEN)\n` +
+        `  ✓ Account names and metadata\n\n` +
+        `🔒 HIDDEN (not revealed or committed):\n` +
+        `  ✓ ${balanceStrings.length} balance amount(s) - REDACTED\n` +
+        `  ⚠️  Note: Using partial transcript (not hash commitments)\n` +
+        `  ⚠️  Verifier can see structure but not balance values\n\n` +
+        `🎉 Privacy-Preserving Proof Complete!\n\n` +
+        `📝 TODO: Upgrade to notarize() flow for hash commitments`
       );
 
       setStatus('success');

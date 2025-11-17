@@ -1,6 +1,6 @@
 use anyhow::{Result, Context};
 use k256::{
-    schnorr::{SigningKey, Signature, VerifyingKey, signature::Signer},
+    schnorr::{SigningKey, Signature, signature::Signer},
     elliptic_curve::rand_core::OsRng,
 };
 use k256::sha2::{Digest, Sha256};
@@ -97,23 +97,48 @@ pub async fn sign_attestation(mut output: VerifierOutput) -> Result<Vec<u8>> {
 
 /// Extract the balance commitment from transcript commitments
 fn extract_balance_commitment(output: &VerifierOutput) -> Result<Vec<u8>> {
-    // In alpha.12, transcript_commitments is a Vec<TranscriptCommitment>
-    // We need to serialize and hash these commitments
+    // For selective disclosure with privacy:
+    // 1. Prover creates: commitment = SHA256(balance || blinder)
+    // 2. Prover sends TranscriptCommitment::Hash containing this hash
+    // 3. Verifier extracts the hash directly (NOT rehashing it)
+    // 4. This hash is what goes into the attestation for on-chain verification
 
     if output.transcript_commitments.is_empty() {
-        anyhow::bail!("No transcript commitments found");
+        anyhow::bail!("No transcript commitments found - prover must provide at least one commitment");
     }
 
-    // Serialize the commitments to bytes
-    let commitments_bytes = bincode::serialize(&output.transcript_commitments)
-        .context("Failed to serialize transcript commitments")?;
+    // Find the first Hash commitment (should be the balance commitment)
+    // In production, you might want to verify this is specifically for the balance field
+    for commitment in &output.transcript_commitments {
+        if let tlsn_core::transcript::TranscriptCommitment::Hash(hash_commitment) = commitment {
+            // Validate it's using SHA256 as required by the protocol
+            use tlsn_core::hash::HashAlgId;
+            if hash_commitment.hash.alg != HashAlgId::SHA256 {
+                warn!("⚠️  Expected SHA256 commitment, got {:?}", hash_commitment.hash.alg);
+                anyhow::bail!(
+                    "Invalid commitment algorithm: expected SHA256, got {:?}",
+                    hash_commitment.hash.alg
+                );
+            }
 
-    // Use a hash of the commitments as the balance commitment
-    // This ensures the attestation is cryptographically bound to the session
-    use sha2::{Digest, Sha256};
-    let commitment_hash = Sha256::digest(&commitments_bytes);
+            // Extract the actual hash value - this is commitment = SHA256(balance || blinder)
+            // Hash implements From<Hash> for Vec<u8>, so we can use into()
+            let commitment_bytes: Vec<u8> = hash_commitment.hash.value.clone().into();
 
-    Ok(commitment_hash.to_vec())
+            info!("✅ Extracted SHA256 balance commitment:");
+            info!("   Algorithm: SHA256");
+            info!("   Direction: {:?}", hash_commitment.direction);
+            info!("   Hash: {}", hex::encode(&commitment_bytes));
+            info!("   Size: {} bytes (perfect for on-chain verification)", commitment_bytes.len());
+
+            return Ok(commitment_bytes);
+        }
+    }
+
+    // If we only found Encoding commitments, that's an error
+    anyhow::bail!(
+        "No Hash commitments found - prover must use TranscriptCommitmentKind::Hash with SHA256"
+    )
 }
 
 /// Load existing key or generate new one

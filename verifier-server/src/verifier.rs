@@ -132,19 +132,40 @@ where
 
     info!("✅ MPC-TLS verification complete");
 
-    // Step 5: Log what was verified
+    // Step 5: Log what was verified (privacy-preserving)
     if let Some(server_name) = &output.server_name {
         info!("🌐 Verified server: {:?}", server_name);
     }
 
+    // PRIVACY: Log transcript presence but NEVER log actual content
+    // This ensures the verifier cannot see sensitive balance data
     if let Some(transcript) = &output.transcript {
-        info!("📊 Transcript: {} bytes sent, {} bytes received",
+        info!("📊 Partial transcript received: {} bytes sent, {} bytes received",
               transcript.sent_unsafe().len(),
               transcript.received_unsafe().len());
+        info!("⚠️  Note: Verifier can see revealed transcript ranges");
+    } else {
+        info!("🔒 No transcript revealed (selective disclosure mode)");
     }
 
-    info!("🔐 Commitments: {} bytes of transcript commitments received",
+    info!("🔐 Received {} transcript commitment(s)",
           output.transcript_commitments.len());
+
+    // Log commitment types for debugging
+    for (i, commitment) in output.transcript_commitments.iter().enumerate() {
+        match commitment {
+            tlsn_core::transcript::TranscriptCommitment::Encoding(_) => {
+                info!("   Commitment {}: Encoding (Merkle tree)", i);
+            }
+            tlsn_core::transcript::TranscriptCommitment::Hash(hash) => {
+                info!("   Commitment {}: Hash ({:?}, direction: {:?})",
+                      i, hash.hash.alg, hash.direction);
+            }
+            _ => {
+                info!("   Commitment {}: Unknown type", i);
+            }
+        }
+    }
 
     Ok(output)
 }

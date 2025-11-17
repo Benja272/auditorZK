@@ -227,3 +227,5 @@ lsof -i :3000
 ## License
 
 (To be determined)
+
+Contrato de alquiler de dust sobre pruebas de reservas en cardano.
