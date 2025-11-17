@@ -32,7 +32,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Cryptography (for signing attestations)
-k256 = { version = "0.13", features = ["ecdsa", "pem"] }
+k256 = { version = "0.13", features = ["schnorr", "pem"] }
 sha2 = "0.10"
 hex = "0.4"
 

@@ -1,6 +1,6 @@
 use anyhow::{Result, Context};
 use k256::{
-    ecdsa::{SigningKey, Signature, signature::Signer},
+    schnorr::{SigningKey, Signature, VerifyingKey, signature::Signer},
     elliptic_curve::rand_core::OsRng,
 };
 use k256::sha2::{Digest, Sha256};
@@ -12,6 +12,7 @@ use tlsn_core::VerifierOutput;
 
 const KEY_PATH: &str = "config/notary_key.pem";
 const PUBKEY_PATH: &str = "config/notary_pubkey.pem";
+const SIGNATURE_VERSION: [u8; 3] = [0x01, 0x00, 0x00]; // BIP-340 signature version 1.0.0
 
 /// Attestation structure that will be signed
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,8 +23,8 @@ pub struct Attestation {
     pub timestamp: u64,
     /// Commitment to the balance data (first hash commitment)
     pub balance_commitment: Vec<u8>,
-    /// Signature from the verifier/notary
-    pub signature: Vec<u8>,
+    /// BIP-340 signature (hex-encoded with 3-byte version prefix)
+    pub signature: String,
     /// The verifier's public key (for signature verification)
     pub verifier_pubkey: Vec<u8>,
 }
@@ -54,7 +55,7 @@ pub async fn sign_attestation(mut output: VerifierOutput) -> Result<Vec<u8>> {
     info!("   Timestamp: {}", timestamp);
     info!("   Commitment: {}...", hex::encode(&balance_commitment[..16]));
 
-    // Create message to sign
+    // Create message to sign (server_name + timestamp + balance_commitment)
     let mut message = Vec::new();
     message.extend_from_slice(server_name.as_bytes());
     message.extend_from_slice(&timestamp.to_le_bytes());
@@ -63,18 +64,26 @@ pub async fn sign_attestation(mut output: VerifierOutput) -> Result<Vec<u8>> {
     // Hash the message
     let message_hash = Sha256::digest(&message);
 
-    // Sign the hash
+    // Sign with BIP-340 Schnorr
     let signature: Signature = signing_key.sign(&message_hash);
 
-    info!("✅ Attestation signed with ECDSA");
+    // Create hex-encoded signature with 3-byte version prefix
+    let sig_bytes = signature.to_bytes();
+    let mut versioned_sig = Vec::with_capacity(67); // 3 + 64
+    versioned_sig.extend_from_slice(&SIGNATURE_VERSION);
+    versioned_sig.extend_from_slice(&sig_bytes);
+    let hex_signature = hex::encode(versioned_sig);
+
+    info!("✅ Attestation signed with BIP-340 Schnorr");
+    info!("   Signature: {}...", &hex_signature[..32]);
 
     // Create attestation structure
     let attestation = Attestation {
         server_name,
         timestamp,
         balance_commitment,
-        signature: signature.to_der().as_bytes().to_vec(),
-        verifier_pubkey: verifying_key.to_sec1_bytes().to_vec(),
+        signature: hex_signature,
+        verifier_pubkey: verifying_key.to_bytes().to_vec(),
     };
 
     // Serialize attestation
@@ -124,7 +133,7 @@ fn load_or_generate_key() -> Result<SigningKey> {
 
     // Save public key for verification
     let verifying_key = signing_key.verifying_key();
-    let pubkey_bytes = verifying_key.to_sec1_bytes();
+    let pubkey_bytes = verifying_key.to_bytes();
     fs::write(PUBKEY_PATH, hex::encode(pubkey_bytes))
         .context("Failed to save public key")?;
     info!("💾 Public key saved to {}", PUBKEY_PATH);
