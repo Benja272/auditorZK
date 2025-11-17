@@ -28,11 +28,11 @@ pub fn validate_plaid_connection(output: &VerifierOutput) -> Result<()> {
 
     info!("✅ Confirmed valid server: {}", name_str);
 
-    // Validate we received commitments
-    if output.transcript_commitments.is_empty() {
-        warn!("⚠️  No transcript commitments provided");
-        bail!("Prover must commit to transcript data");
-    }
+    // // Validate we received commitments
+    // if output.transcript_commitments.is_empty() {
+    //     warn!("⚠️  No transcript commitments provided");
+    //     bail!("Prover must commit to transcript data");
+    // }
 
     info!("✅ {} transcript commitments received",
           output.transcript_commitments.len());

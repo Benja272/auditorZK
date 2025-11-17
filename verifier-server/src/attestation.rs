@@ -39,7 +39,7 @@ pub async fn sign_attestation(mut output: VerifierOutput) -> Result<Vec<u8>> {
 
     // Extract server name
     let server_name = output.server_name.take()
-        .map(|sn| format!("{:?}", sn))
+        .map(|sn| format!("{:?}", sn.as_str()))
         .unwrap_or_else(|| "unknown".to_string());
 
     // Get current timestamp
@@ -50,19 +50,36 @@ pub async fn sign_attestation(mut output: VerifierOutput) -> Result<Vec<u8>> {
     // Extract balance commitment (first hash commitment from received data)
     let balance_commitment = extract_balance_commitment(&output)?;
 
+    // Pad server_name to 32 bytes (right-padded with zeros)
+    let mut server_name_padded = [0u8; 32];
+    let server_name_bytes = server_name.as_bytes();
+    if server_name_bytes.len() > 32 {
+        anyhow::bail!("Server name too long: {} bytes (max 32)", server_name_bytes.len());
+    }
+    server_name_padded[..server_name_bytes.len()].copy_from_slice(server_name_bytes);
+
+    // Pad timestamp to 32 bytes (right-padded with zeros)
+    let mut timestamp_padded = [0u8; 32];
+    let timestamp_bytes = timestamp.to_le_bytes(); // 8 bytes
+    timestamp_padded[..8].copy_from_slice(&timestamp_bytes);
+
     info!("📝 Attestation details:");
-    info!("   Server: {}", server_name);
-    info!("   Timestamp: {}", timestamp);
-    info!("   Commitment: {}...", hex::encode(&balance_commitment[..16]));
+    info!("   Server: {} (padded to 32 bytes)", server_name);
+    info!("   Server bytes: {}", hex::encode(&server_name_padded));
+    info!("   Timestamp: {} (padded to 32 bytes)", timestamp);
+    info!("   Timestamp bytes: {}", hex::encode(&timestamp_padded));
+    info!("   Commitment: {}", hex::encode(&balance_commitment));
 
     // Create message to sign (server_name + timestamp + balance_commitment)
+    // All fields are now 32 bytes each
     let mut message = Vec::new();
-    message.extend_from_slice(server_name.as_bytes());
-    message.extend_from_slice(&timestamp.to_le_bytes());
+    message.extend_from_slice(&server_name_padded);
+    message.extend_from_slice(&timestamp_padded);
     message.extend_from_slice(&balance_commitment);
 
     // Hash the message
     let message_hash = Sha256::digest(&message);
+    info!("   hash: {}", hex::encode(message_hash));
 
     // Sign with BIP-340 Schnorr
     let signature: Signature = signing_key.sign(&message_hash);
@@ -75,7 +92,7 @@ pub async fn sign_attestation(mut output: VerifierOutput) -> Result<Vec<u8>> {
     let hex_signature = hex::encode(versioned_sig);
 
     info!("✅ Attestation signed with BIP-340 Schnorr");
-    info!("   Signature: {}...", &hex_signature[..32]);
+    info!("   Signature: {}...", &hex_signature);
 
     // Create attestation structure
     let attestation = Attestation {
@@ -96,22 +113,68 @@ pub async fn sign_attestation(mut output: VerifierOutput) -> Result<Vec<u8>> {
 }
 
 /// Extract the balance commitment from transcript commitments
+/// MOCK IMPLEMENTATION: Creates a fake commitment from the transcript data
 fn extract_balance_commitment(output: &VerifierOutput) -> Result<Vec<u8>> {
-    // In alpha.12, transcript_commitments is a Vec<TranscriptCommitment>
-    // We need to serialize and hash these commitments
+    // TEMPORARY MOCK: Extract balance from transcript and create commitment
+    // In production, this should come from the prover's selective disclosure
 
-    if output.transcript_commitments.is_empty() {
-        anyhow::bail!("No transcript commitments found");
+    let transcript = output.transcript.as_ref()
+        .context("No transcript available")?;
+
+    let received_bytes = transcript.received_unsafe();
+
+    // Find the JSON body (skip HTTP headers - look for "\r\n\r\n")
+    let body_start = received_bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .context("No HTTP body separator found")?
+        + 4;
+
+    let json_body = &received_bytes[body_start..];
+
+    let json_str = std::str::from_utf8(json_body)
+        .context("Invalid UTF-8 in JSON body")?;
+
+    info!("📄 JSON body (for mocking commitment):");
+    info!("{}", json_str);
+
+    // Parse JSON to extract balance
+    let json: serde_json::Value = serde_json::from_str(json_str)
+        .context("Failed to parse JSON response")?;
+
+    let accounts = json["accounts"].as_array()
+        .context("No accounts array found")?;
+
+    let mut total_balance = 0.0;
+    for account in accounts {
+        // Try to get balance from "current" field (can be f64 or i64)
+        if let Some(current) = account["balances"]["current"].as_f64() {
+            total_balance += current;
+        } else if let Some(current) = account["balances"]["current"].as_i64() {
+            total_balance += current as f64;
+        } else if let Some(current) = account["balances"]["current"].as_u64() {
+            total_balance += current as f64;
+        }
     }
 
-    // Serialize the commitments to bytes
-    let commitments_bytes = bincode::serialize(&output.transcript_commitments)
-        .context("Failed to serialize transcript commitments")?;
+    if total_balance == 0.0 {
+        anyhow::bail!("No balance found in accounts");
+    }
 
-    // Use a hash of the commitments as the balance commitment
-    // This ensures the attestation is cryptographically bound to the session
+    info!("💰 Total balance (extracted): ${:.2}", total_balance);
+
+    // Create mock commitment: hash(balance_string || mock_blinder)
+    let balance_string = format!("{:.2}", total_balance);
+    let mock_blinder = b"mock_blinder_for_testing"; // In production, from MPC
+
+    let mut commitment_preimage = Vec::new();
+    commitment_preimage.extend_from_slice(balance_string.as_bytes());
+    commitment_preimage.extend_from_slice(mock_blinder);
+
     use sha2::{Digest, Sha256};
-    let commitment_hash = Sha256::digest(&commitments_bytes);
+    let commitment_hash = Sha256::digest(&commitment_preimage);
+
+    info!("🔐 Mock commitment created: {}...", hex::encode(&commitment_hash));
 
     Ok(commitment_hash.to_vec())
 }
